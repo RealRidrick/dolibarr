@@ -14,4 +14,3 @@ jobs:
           GH_TOKEN: ${{ secrets.FORK_SYNC_TOKEN }}
         run: |
           gh repo sync "$GITHUB_REPOSITORY" --branch develop
-          gh repo sync "$GITHUB_REPOSITORY" --branch 24.0
