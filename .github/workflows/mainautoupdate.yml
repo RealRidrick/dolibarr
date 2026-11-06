@@ -1,0 +1,17 @@
+name: Fork bijwerken met Dolibarr
+on:
+  schedule:
+    - cron: '17 3 * * *'   # elke nacht om 03:17 UTC
+  workflow_dispatch:        # ook met de hand te starten
+permissions:
+  contents: write
+jobs:
+  bijwerken:
+    runs-on: ubuntu-latest
+    steps:
+      - name: develop en 24.0 bijwerken vanuit Dolibarr/dolibarr
+        env:
+          GH_TOKEN: ${{ secrets.FORK_SYNC_TOKEN }}
+        run: |
+          gh repo sync "$GITHUB_REPOSITORY" --branch develop
+          gh repo sync "$GITHUB_REPOSITORY" --branch 24.0
