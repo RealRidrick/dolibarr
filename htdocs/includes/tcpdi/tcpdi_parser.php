@@ -194,6 +194,11 @@ class tcpdi_parser {
         $this->FilterDecoders = new TCPDF_FILTERS();
         // get xref and trailer data
         $this->xref = $this->getXrefData();
+        // @CHANGE DOL An encrypted document can not be imported: say so instead of writing a page of the encrypted
+        // bytes without any error, or failing later on an obscure "decodeFilterFlateDecode: invalid code".
+        if (isset($this->xref['trailer'][1]['/Encrypt'])) {
+            $this->Error('This PDF document is encrypted and cannot be imported.');
+        }
         $this->findObjectOffsets();
         // parse all document objects
         $this->objects = array();
@@ -345,11 +350,34 @@ class tcpdi_parser {
         }
         unset($matches);
 
-        // DOMPDF gets the startxref wrong, giving us the linebreak before the xref starts.
-        $startxref += strspn($this->pdfdata, "\r\n", $startxref);
+        // @CHANGE DOL Check that the offset is inside the file and really is the start of a xref section (table or
+        // stream). With PHP 8, strpos() throws a ValueError on an offset beyond the end of the data.
+        $startxref = (int) $startxref;
+        $pdflen = strlen($this->pdfdata);
+        if ($startxref < $pdflen) {
+            // DOMPDF gets the startxref wrong, giving us the linebreak before the xref starts.
+            $startxref += strspn($this->pdfdata, "\x00\x09\x0a\x0c\x0d\x20", $startxref);
+        }
+        $isxreftable = ($startxref < $pdflen && substr($this->pdfdata, $startxref, 4) === 'xref');
+        $isxrefstream = (!$isxreftable && $startxref < $pdflen && preg_match('/\G[0-9]+[\s]+[0-9]+[\s]+obj/', $this->pdfdata, $matches, 0, $startxref) == 1);
+        if (!$isxreftable && !$isxrefstream) {
+            if ($offset != 0) {
+                // A previous xref section that can not be found: keep what the newer sections gave.
+                return $xref;
+            }
+            // The startxref of the file is wrong: fall back on the last xref table of the file, if any.
+            if (preg_match_all('/[\r\n]xref[\s]*[\r\n]/', $this->pdfdata, $matches, PREG_OFFSET_CAPTURE) >= 1) {
+                $last = end($matches[0]);
+                $startxref = $last[1] + 1;
+                $isxreftable = true;
+            } else {
+                $this->Error('Unable to find xref');
+            }
+        }
+        unset($matches);
 
         // check xref position
-        if (strpos($this->pdfdata, 'xref', $startxref) == $startxref) {
+        if ($isxreftable) {
             // Cross-Reference
             $xref = $this->decodeXref($startxref, $xref);
         } else {
@@ -422,6 +450,9 @@ class tcpdi_parser {
                 }
                 if (preg_match('/Encrypt[\s]+([0-9]+)[\s]+([0-9]+)[\s]+R/i', $trailer_data, $matches) > 0) {
                     $xref['trailer'][1]['/Encrypt'] = array(PDF_TYPE_OBJREF, intval($matches[1]), intval($matches[2]));
+                } elseif (preg_match('/\/Encrypt[\s]*<</', $trailer_data) > 0) {
+                    // @CHANGE DOL the encryption dictionary written in place in the trailer
+                    $xref['trailer'][1]['/Encrypt'] = array(PDF_TYPE_DICTIONARY, array());
                 }
                 if (preg_match('/Info[\s]+([0-9]+)[\s]+([0-9]+)[\s]+R/i', $trailer_data, $matches) > 0) {
                     $xref['trailer'][1]['/Info'] = array(PDF_TYPE_OBJREF, intval($matches[1]), intval($matches[2]));
@@ -520,6 +551,7 @@ class tcpdi_parser {
                     case '/Root':
                     case '/Info':
                     case '/ID':
+                    case '/Encrypt':	// @CHANGE DOL the cross-reference stream of an encrypted document holds it too
                         $xref['trailer'][1][$key] = $v;
                         break;
                     default:
@@ -952,14 +984,14 @@ class tcpdi_parser {
             $this->Error('Invalid object reference: '.$obj);
             return;
         }
-        $objref = $obj[0].' '.$obj[1].' obj';
-
-        if (strpos($this->pdfdata, $objref, $offset) != $offset) {
+        // @CHANGE DOL Accept any white space between the object number, the generation number and the keyword
+        $headerlen = $this->matchObjectHeader($obj[0], $obj[1], $offset);
+        if ($headerlen === false) {
             // an indirect reference to an undefined object shall be considered a reference to the null object
             return array('null', 'null', $offset);
         }
         // starting position of object content
-        $offset += strlen($objref);
+        $offset += $headerlen;
         // get array of object content
         $objdata = array();
         $i = 0; // object main index
@@ -990,6 +1022,27 @@ class tcpdi_parser {
         array_pop($objdata);
         // return raw object content
         return $objdata;
+    }
+
+    /**
+     * Check that an object starts at a given offset, and give the length of its header ("12 0 obj").
+     * @CHANGE DOL New method. The header was compared to the string "$num $gen obj": the objects of a file that separates
+     * them with something else than one space ("12         0 obj", or a line break) were never found.
+     *
+     * @param $num (int) Object number
+     * @param $gen (int) Generation number
+     * @param $offset (int) Offset in the document
+     * @return int|false Length of the header, false if this object does not start at this offset
+     */
+    private function matchObjectHeader($num, $gen, $offset) {
+        if (!is_numeric($offset) || $offset < 0 || $offset >= strlen($this->pdfdata)) {
+            // with PHP 8, the string functions throw a ValueError on an offset out of the data
+            return false;
+        }
+        if (preg_match('/\G'.intval($num).'[\s]+'.intval($gen).'[\s]+obj/', $this->pdfdata, $matches, 0, (int) $offset) == 1) {
+            return strlen($matches[0]);
+        }
+        return false;
     }
 
     /**
@@ -1060,10 +1113,12 @@ class tcpdi_parser {
         }
         $stream = $this->decodeStream($obj[1][1], $obj[2][1]);// Decode object stream, as we need the first bit
         $first = intval($obj[1][1]['/First'][1]);
-        $ints = preg_split('/\s/', substr($stream[0], 0, $first)); // Get list of object / offset pairs
-        for ($j=1; $j<count($ints); $j++) {
-            if (($j % 2) == 1) {
-                $this->objstreamobjs[$ints[$j-1]] = array($key, $ints[$j]+$first);
+        // @CHANGE DOL Get list of object / offset pairs. They may be separated by any number of white space chars, the
+        // split on each single one gave empty values (then a TypeError) with a CRLF or two spaces.
+        $ints = preg_split('/[\s]+/', trim(substr($stream[0], 0, $first)));
+        for ($j=1; $j<count($ints); $j+=2) {
+            if (is_numeric($ints[$j-1]) && is_numeric($ints[$j])) {
+                $this->objstreamobjs[(int) $ints[$j-1]] = array($key, ((int) $ints[$j]) + $first);
             }
         }
 
@@ -1087,7 +1142,8 @@ class tcpdi_parser {
                     // Contained within another stream, skip it.
                     continue;
                 }
-                $this->objoffsets[trim($match[0])] = $offset;
+                // @CHANGE DOL the key is always "num gen obj", whatever separates the numbers in the file
+                $this->objoffsets[intval($matches[1][$i][0]).' '.intval($matches[2][$i][0]).' obj'] = $offset;
                 $dictoffset = $match[1] + strlen($match[0]);
                 $dictfrag = substr($this->pdfdata, $dictoffset, 256);
                 if (preg_match('|^\s+<<[^>]+/Length\s+(\d+)|', $dictfrag, $lengthmatch, PREG_OFFSET_CAPTURE) == 1) {
@@ -1111,13 +1167,13 @@ class tcpdi_parser {
      * @private
      */
     private function findObjectOffset($key) {
-        $objref = $key[0].' '.$key[1].' obj';
+        $objref = intval($key[0]).' '.intval($key[1]).' obj';	// @CHANGE DOL normalized key
         if (isset($this->xref['xref'][$key[0]][$key[1]])) {
             $offset = $this->xref['xref'][$key[0]][$key[1]];
-            if (strpos($this->pdfdata, $objref, $offset) === $offset) {
+            if ($this->matchObjectHeader($key[0], $key[1], $offset) !== false) {	// @CHANGE DOL
                 // Offset is in xref table and matches actual position in file
                 //echo "Offset in XREF is correct, returning<br>";
-                return $this->xref['xref'][$key[0]][$key[1]];
+                return $offset;
             }
         }
         if (array_key_exists($objref, $this->objoffsets)) {
@@ -1163,13 +1219,44 @@ class tcpdi_parser {
         $remaining_filters = array();
         foreach ($filters as $filter) {
             if (in_array($filter, $this->FilterDecoders->getAvailableFilters())) {
-                $stream = $this->FilterDecoders->decodeFilter($filter, $stream);
+                $stream = $this->decodeFilter($filter, $stream);	// @CHANGE DOL
             } else {
                 // add missing filter to array
                 $remaining_filters[] = $filter;
             }
         }
         return array($stream, $remaining_filters);
+    }
+
+    /**
+     * Decode data with a filter.
+     * @CHANGE DOL New method. A FlateDecode stream that has no end marker (the writer did not flush it, or the declared
+     * length is too short) is refused by gzuncompress() but opens in every PDF reader: decode what is there.
+     *
+     * @param $filter (string) Name of the filter
+     * @param $stream (string) Data to decode
+     * @return string Decoded data
+     */
+    private function decodeFilter($filter, $stream) {
+        if ($filter == 'FlateDecode') {
+            if ($stream === '') {
+                return '';
+            }
+            $decoded = @gzuncompress($stream);
+            if ($decoded === false) {
+                if (function_exists('inflate_init')) {
+                    $context = @inflate_init(ZLIB_ENCODING_DEFLATE);
+                    if ($context !== false) {
+                        $decoded = @inflate_add($context, $stream, ZLIB_SYNC_FLUSH);
+                    }
+                }
+                if ($decoded === false) {
+                    $this->Error('decodeFilterFlateDecode: invalid code');
+                }
+            }
+            return $decoded;
+        }
+        return $this->FilterDecoders->decodeFilter($filter, $stream);
     }
 
 
@@ -1337,7 +1424,7 @@ class tcpdi_parser {
         $stream = $obj[2][1];
 
         foreach ($filters AS $_filter) {
-            $stream = $this->FilterDecoders->decodeFilter($_filter[1], $stream);
+            $stream = $this->decodeFilter($_filter[1], $stream);	// @CHANGE DOL
         }
 
         return $stream;
