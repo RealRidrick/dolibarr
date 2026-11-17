@@ -702,6 +702,9 @@ function getEntity($element, $shared = 1, $currentobject = null)
 		case 'facturerec':
 			$element = 'invoice';
 			break; // "/compta/facture/class/facture-rec.class.php", template invoices are shared like invoices
+		case 'fichinter':
+			$element = 'intervention';
+			break; // "/fichinter/class/fichinter.class.php", interventions are shared with name 'intervention'
 	}
 
 	if (is_object($mc)) {
@@ -10636,7 +10639,7 @@ function roundUpToNextMultiple($n, $x = 5)
  * @param   string $elementType       Element type (Value of $object->element or value of $object->element@$object->module). Example:
  *                                    'action', 'facture', 'project', 'project_task' or
  *                                    'myobject@mymodule' (or old syntax 'mymodule_myobject' like 'project_task')
- * @return  array{module:string,element:string,table_element:string,subelement:string,classpath:string,classfile:string,classname:string,dir_output:string,dir_temp:string,parent_element:string}		array('module'=>, 'classpath'=>, 'element'=>, 'subelement'=>, 'classfile'=>, 'classname'=>, 'dir_output'=>, 'dir_temp'=>)
+ * @return  array{module:string,element:string,table_element:string,subelement:string,classpath:string,classfile:string,classname:string,dir_output:string,dir_temp:string,parent_element:string}		Return an array('module'=>, 'classpath'=>, 'element'=>, 'subelement'=>, 'table_element'=>, 'classfile'=>, 'classname'=>, 'dir_output'=>, 'dir_temp'=>)
  * @see fetchObjectByElement(), getMultidirOutput()
  */
 function getElementProperties($elementType)
@@ -10826,9 +10829,10 @@ function getElementProperties($elementType)
 	} elseif ($elementType == 'supplier_proposal') {
 		$classpath = 'supplier_proposal/class';
 		$module = 'supplier_proposal';
-		$element = 'supplierproposal';
+		$element = 'supplier_proposal';
 		$classfile = 'supplier_proposal';
 		$subelement = 'supplierproposal';
+		$table_element = 'supplier_proposal';
 	} elseif ($elementType == 'supplier_proposaldet') {
 		$classpath = 'supplier_proposal/class';
 		$module = 'supplier_proposal';
@@ -10890,6 +10894,7 @@ function getElementProperties($elementType)
 	} elseif ($elementType == 'fichinter' || $elementType == 'ficheinter') {
 		$classpath = 'fichinter/class';
 		$module = 'ficheinter';
+		$element = 'fichinter';
 		$subelement = 'fichinter';
 		$table_element = 'fichinter';
 	} elseif ($elementType == 'dolresource' || $elementType == 'resource') {
@@ -10918,7 +10923,7 @@ function getElementProperties($elementType)
 		$classname = 'CommandeFournisseurLigne';
 		$table_element = 'commande_fournisseurdet';
 		$parent_element = 'commande_fournisseur';
-	} elseif ($elementType == 'invoice_supplier' || $elementType == 'supplier_invoice' || $elementType == 'facture_fourn') {
+	} elseif ($elementType == 'invoice_supplier' || $elementType == 'supplier_invoice' || $elementType == 'facture_fourn' || $elementType == 'facture_fournisseur') {
 		$classpath = 'fourn/class';
 		$module = 'fournisseur';
 		$classfile = 'fournisseur.facture';
